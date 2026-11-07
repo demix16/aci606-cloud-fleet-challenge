@@ -1,16 +1,23 @@
-"""Etapa 4 del ejercicio: FastAPI con telemetría persistente.
+"""Etapa 6 ACI606: persistencia + inferencia de ML para la flota.
 
-Se preservan las 7 rutas del starter. /predict seguirá con 501 hasta la
-siguiente etapa, cuando se integre el pipeline entrenado.
+Mantiene las siete rutas del contrato del profesor. No altera el esquema de la
+base de datos; reutiliza las columnas predicted_status y confidence de Etapa 4.
 """
 from __future__ import annotations
 
+import logging
+import os
+from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
+from time import monotonic, perf_counter
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+import joblib
+import pandas as pd
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
@@ -18,51 +25,147 @@ from sqlalchemy import func, select
 from app.db import Base, SessionLocal, TelemetryRecord, engine
 
 ROOT = Path(__file__).resolve().parents[1]
+LOGGER = logging.getLogger(__name__)
 Status = Literal["NORMAL", "WARNING", "CRITICAL"]
+VALID_STATUSES = {"NORMAL", "WARNING", "CRITICAL"}
 
 
 class Telemetry(BaseModel):
+    # Campos desconocidos, NaN, Infinity o valores fuera de rango -> HTTP 422.
     model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
-    robot_id: str = Field(min_length=1, max_length=20)
+    robot_id: str = Field(min_length=1, max_length=20, pattern=r"^[A-Za-z0-9_-]+$")
     timestamp: float = Field(gt=0, allow_inf_nan=False)
     x: float = Field(allow_inf_nan=False)
     y: float = Field(allow_inf_nan=False)
-    speed: float = Field(ge=0, allow_inf_nan=False)
+    speed: float = Field(ge=0, le=1.5, allow_inf_nan=False)
     battery: float = Field(ge=0, le=100, allow_inf_nan=False)
-    motor_temp: float = Field(allow_inf_nan=False)
-    vibration: float = Field(ge=0, allow_inf_nan=False)
-    motor_current: float = Field(ge=0, allow_inf_nan=False)
-    obstacle_distance: float = Field(ge=0, allow_inf_nan=False)
+    motor_temp: float = Field(ge=-50, le=200, allow_inf_nan=False)
+    vibration: float = Field(ge=0, le=100, allow_inf_nan=False)
+    motor_current: float = Field(ge=0, le=100, allow_inf_nan=False)
+    obstacle_distance: float = Field(ge=0, le=10000, allow_inf_nan=False)
 
 
 class PredictionRequest(Telemetry):
     pass
 
 
+_model_bundle: dict | None = None
+_stats_lock = Lock()
+_stats = Counter()
+_total_inference_ms = 0.0
+_inference_count = 0
+_started_at = monotonic()
+
+
+def model_path() -> Path:
+    path = Path(os.getenv("MODEL_PATH", "models/model.joblib"))
+    return path if path.is_absolute() else ROOT / path
+
+
+def load_model() -> dict | None:
+    path = model_path()
+    if not path.is_file():
+        LOGGER.warning("No se encontró models/model.joblib. /predict responderá 503.")
+        return None
+    # joblib.load ejecuta deserialización de Python: cargar SOLO modelos propios/confiables.
+    bundle = joblib.load(path)
+    if not isinstance(bundle, dict):
+        raise RuntimeError("El modelo guardado no tiene el formato esperado (dict).")
+    needed = {"pipeline", "features", "model_version"}
+    if not needed.issubset(bundle):
+        raise RuntimeError("El modelo no contiene pipeline, features y model_version.")
+    if not isinstance(bundle["features"], list) or not bundle["features"]:
+        raise RuntimeError("El modelo no contiene una lista válida de features.")
+    if not set(bundle["features"]).issubset(Telemetry.model_fields):
+        raise RuntimeError("El modelo requiere features que no están en Telemetry.")
+    pipeline = bundle["pipeline"]
+    if not hasattr(pipeline, "predict") or not hasattr(pipeline, "predict_proba"):
+        raise RuntimeError("El pipeline debe permitir predict() y predict_proba().")
+    LOGGER.info("Modelo cargado: %s", bundle["model_version"])
+    return bundle
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Crea la tabla al iniciar. Para cambios futuros de esquema: usar migraciones.
+    global _model_bundle
+    # CREATE TABLE IF NOT EXISTS; no borra el historial existente de Neon.
     Base.metadata.create_all(bind=engine)
+    _model_bundle = load_model()
     yield
+    _model_bundle = None
 
 
 app = FastAPI(
     title="ACI606 Cloud Fleet Challenge",
-    version="0.2.0-persistence",
-    description="Etapa 4: persistencia de la flota.",
+    version="0.3.0-inference",
+    description="Etapa 6: almacenamiento persistente e inferencia de ML.",
     lifespan=lifespan,
 )
 
-# Contador de proceso: se reinicia cuando el servidor se reinicia.
-REQUEST_COUNT = 0
-FIELDS = [
+
+@app.middleware("http")
+async def count_http(request: Request, call_next):
+    with _stats_lock:
+        _stats["http_requests_since_boot"] += 1
+    try:
+        response = await call_next(request)
+    except Exception:
+        with _stats_lock:
+            _stats["errors_5xx_since_boot"] += 1
+        raise
+    if response.status_code >= 400:
+        with _stats_lock:
+            _stats["errors_4xx_since_boot" if response.status_code < 500 else "errors_5xx_since_boot"] += 1
+    return response
+
+
+FIELDS = (
     "robot_id", "timestamp", "x", "y", "speed", "battery", "motor_temp",
     "vibration", "motor_current", "obstacle_distance",
-]
+)
 
 
 def serialize(record: TelemetryRecord) -> dict:
-    return {name: getattr(record, name) for name in FIELDS}
+    result = {name: getattr(record, name) for name in FIELDS}
+    result["predicted_status"] = record.predicted_status
+    result["confidence"] = record.confidence
+    return result
+
+
+def infer(sample: Telemetry) -> dict:
+    global _total_inference_ms, _inference_count
+    if _model_bundle is None:
+        raise HTTPException(status_code=503, detail="Modelo no disponible. Entrenar y guardar models/model.joblib.")
+
+    values = sample.model_dump()
+    features = _model_bundle["features"]
+    row = pd.DataFrame([{feature: values[feature] for feature in features}], columns=features)
+    start = perf_counter()
+    try:
+        pipeline = _model_bundle["pipeline"]
+        predicted = str(pipeline.predict(row)[0])
+        probabilities = pipeline.predict_proba(row)[0]
+        classes = list(pipeline.classes_)
+        if predicted not in VALID_STATUSES or predicted not in classes:
+            raise ValueError("Predicción fuera de clases permitidas")
+        confidence = float(probabilities[classes.index(predicted)])
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError("Confianza fuera de rango")
+    except Exception:
+        LOGGER.exception("Error interno de inferencia")
+        raise HTTPException(status_code=503, detail="No se pudo ejecutar el modelo") from None
+
+    elapsed_ms = (perf_counter() - start) * 1000.0
+    with _stats_lock:
+        _inference_count += 1
+        _total_inference_ms += elapsed_ms
+    return {
+        "robot_id": sample.robot_id,
+        "predicted_status": predicted,
+        "confidence": round(confidence, 6),
+        "model_version": str(_model_bundle["model_version"]),
+        "inference_ms": round(elapsed_ms, 3),
+    }
 
 
 @app.get("/health")
@@ -70,34 +173,42 @@ def health() -> dict:
     try:
         with SessionLocal() as session:
             session.execute(select(1)).scalar_one()
-        database_status = "ok"
+        db_status = "ok"
     except Exception:
-        database_status = "unavailable"
+        LOGGER.exception("No se pudo comprobar la base de datos")
+        db_status = "unavailable"
     return {
-        "status": "ok" if database_status == "ok" else "degraded",
+        "status": "ok" if db_status == "ok" else "degraded",
         "service": "aci606-cloud-fleet",
         "version": app.version,
-        "database": database_status,
+        "database": db_status,
         "storage": engine.dialect.name,
+        "model_ready": _model_bundle is not None,
         "utc": datetime.now(timezone.utc).isoformat(),
     }
 
 
 @app.post("/telemetry")
 def ingest_telemetry(sample: Telemetry) -> dict:
-    global REQUEST_COUNT
+    # Al guardar una nueva muestra, también se guarda el estado inferido.
+    prediction = infer(sample) if _model_bundle is not None else None
     values = sample.model_dump()
+    if prediction:
+        values["predicted_status"] = prediction["predicted_status"]
+        values["confidence"] = prediction["confidence"]
     with SessionLocal() as session:
         record = TelemetryRecord(**values)
         session.add(record)
         session.commit()
         session.refresh(record)
         record_id = record.id
-    REQUEST_COUNT += 1
+    with _stats_lock:
+        _stats["telemetry_ingested_since_boot"] += 1
     return {
         "accepted": True,
         "robot_id": sample.robot_id,
         "id": record_id,
+        "predicted_status": prediction["predicted_status"] if prediction else None,
         "server_time": datetime.now(timezone.utc).isoformat(),
         "storage": "DATABASE",
     }
@@ -105,25 +216,23 @@ def ingest_telemetry(sample: Telemetry) -> dict:
 
 @app.get("/robots")
 def list_robots() -> list[dict]:
-    # Último dato insertado por robot, compatible con SQLite y PostgreSQL.
-    row_numbers = (
+    latest_ids = (
         select(
             TelemetryRecord.id.label("id"),
             func.row_number().over(
                 partition_by=TelemetryRecord.robot_id,
                 order_by=TelemetryRecord.id.desc(),
-            ).label("num"),
-        )
-        .subquery()
+            ).label("position"),
+        ).subquery()
     )
-    newest_ids = select(row_numbers.c.id).where(row_numbers.c.num == 1)
+    ids = select(latest_ids.c.id).where(latest_ids.c.position == 1)
     with SessionLocal() as session:
         records = session.scalars(
             select(TelemetryRecord)
-            .where(TelemetryRecord.id.in_(newest_ids))
+            .where(TelemetryRecord.id.in_(ids))
             .order_by(TelemetryRecord.robot_id)
         ).all()
-        return [serialize(record) for record in records]
+    return [serialize(record) for record in records]
 
 
 @app.get("/robots/{robot_id}/history")
@@ -134,34 +243,37 @@ def robot_history(robot_id: str) -> list[dict]:
             .where(TelemetryRecord.robot_id == robot_id)
             .order_by(TelemetryRecord.id.asc())
         ).all()
-        if not records:
-            raise HTTPException(status_code=404, detail="Robot not found")
-        return [serialize(record) for record in records]
+    if not records:
+        raise HTTPException(status_code=404, detail="Robot not found")
+    return [serialize(record) for record in records]
 
 
 @app.post("/predict")
-def predict(_: PredictionRequest) -> dict:
-    # Se completará en la siguiente etapa con models/model.joblib.
-    raise HTTPException(
-        status_code=501,
-        detail="La inferencia se integrará en la siguiente etapa.",
-    )
+def predict(sample: PredictionRequest) -> dict:
+    with _stats_lock:
+        _stats["prediction_requests_since_boot"] += 1
+    return infer(sample)
 
 
 @app.get("/metrics")
 def metrics() -> dict:
     with SessionLocal() as session:
         total_samples = session.scalar(select(func.count()).select_from(TelemetryRecord)) or 0
-        total_robots = session.scalar(
-            select(func.count(func.distinct(TelemetryRecord.robot_id)))
-        ) or 0
+        total_robots = session.scalar(select(func.count(func.distinct(TelemetryRecord.robot_id)))) or 0
+    with _stats_lock:
+        snapshot = dict(_stats)
+        count = _inference_count
+        avg_ms = _total_inference_ms / count if count else 0.0
     return {
-        "requests_received_since_boot": REQUEST_COUNT,
+        **snapshot,
+        "average_inference_ms_since_boot": round(avg_ms, 3),
+        "inference_count_since_boot": count,
+        "uptime_seconds": round(monotonic() - _started_at, 2),
         "total_telemetry_persisted": int(total_samples),
         "total_robots_persisted": int(total_robots),
         "persistence": "DATABASE",
         "database": engine.dialect.name,
-        "prediction_service": "NOT_IMPLEMENTED_YET",
+        "prediction_service": "READY" if _model_bundle is not None else "NOT_AVAILABLE",
     }
 
 
