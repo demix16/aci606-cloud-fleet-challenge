@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections import Counter
+from collections import Counter, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +17,7 @@ from typing import Literal
 
 import joblib
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
@@ -55,6 +55,9 @@ _stats = Counter()
 _total_inference_ms = 0.0
 _inference_count = 0
 _started_at = monotonic()
+# Historial acotado de latencias recientes (sin crecer indefinidamente en RAM).
+_http_latencies_ms = deque(maxlen=3000)
+_predict_http_latencies_ms = deque(maxlen=3000)
 
 
 def model_path() -> Path:
@@ -97,25 +100,46 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="ACI606 Cloud Fleet Challenge",
-    version="0.3.0-inference",
-    description="Etapa 6: almacenamiento persistente e inferencia de ML.",
+    version="0.4.0-dashboard-metrics",
+    description="Etapa 7: persistencia, inferencia, dashboard y observabilidad.",
     lifespan=lifespan,
 )
 
 
+def _percentile(values: list[float], fraction: float) -> float:
+    """Percentil por interpolación lineal; 0 cuando no hay observaciones."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = (len(ordered) - 1) * fraction
+    lower = int(index)
+    upper = min(lower + 1, len(ordered) - 1)
+    return round(ordered[lower] + (ordered[upper] - ordered[lower]) * (index - lower), 3)
+
+
+def _record_http(path: str, status_code: int, elapsed_ms: float) -> None:
+    """Una sola escritura sincronizada por solicitud; mantiene métricas en RAM."""
+    with _stats_lock:
+        _http_latencies_ms.append(elapsed_ms)
+        if path == "/predict":
+            _predict_http_latencies_ms.append(elapsed_ms)
+        if 400 <= status_code < 500:
+            _stats["errors_4xx_since_boot"] += 1
+        elif status_code >= 500:
+            _stats["errors_5xx_since_boot"] += 1
+
+
 @app.middleware("http")
 async def count_http(request: Request, call_next):
+    started = perf_counter()
     with _stats_lock:
         _stats["http_requests_since_boot"] += 1
     try:
         response = await call_next(request)
     except Exception:
-        with _stats_lock:
-            _stats["errors_5xx_since_boot"] += 1
+        _record_http(request.url.path, 500, (perf_counter() - started) * 1000)
         raise
-    if response.status_code >= 400:
-        with _stats_lock:
-            _stats["errors_4xx_since_boot" if response.status_code < 500 else "errors_5xx_since_boot"] += 1
+    _record_http(request.url.path, response.status_code, (perf_counter() - started) * 1000)
     return response
 
 
@@ -236,13 +260,20 @@ def list_robots() -> list[dict]:
 
 
 @app.get("/robots/{robot_id}/history")
-def robot_history(robot_id: str) -> list[dict]:
+def robot_history(
+    robot_id: str,
+    limit: int | None = Query(default=None, ge=1, le=5000),
+) -> list[dict]:
+    """Sin limit: historial COMPLETO (contrato). Con limit: últimas N lecturas."""
     with SessionLocal() as session:
-        records = session.scalars(
-            select(TelemetryRecord)
-            .where(TelemetryRecord.robot_id == robot_id)
-            .order_by(TelemetryRecord.id.asc())
-        ).all()
+        query = select(TelemetryRecord).where(TelemetryRecord.robot_id == robot_id)
+        if limit is None:
+            records = session.scalars(query.order_by(TelemetryRecord.id.asc())).all()
+        else:
+            # Selecciona los últimos N en SQL y los devuelve cronológicamente.
+            records = list(reversed(session.scalars(
+                query.order_by(TelemetryRecord.id.desc()).limit(limit)
+            ).all()))
     if not records:
         raise HTTPException(status_code=404, detail="Robot not found")
     return [serialize(record) for record in records]
@@ -264,11 +295,28 @@ def metrics() -> dict:
         snapshot = dict(_stats)
         count = _inference_count
         avg_ms = _total_inference_ms / count if count else 0.0
+        http_latencies = list(_http_latencies_ms)
+        predict_latencies = list(_predict_http_latencies_ms)
+    uptime = max(0.0, monotonic() - _started_at)
     return {
         **snapshot,
+        # Campos de compatibilidad con Etapa 6 conservados.
+        "http_requests_since_boot": snapshot.get("http_requests_since_boot", 0),
+        "errors_4xx_since_boot": snapshot.get("errors_4xx_since_boot", 0),
+        "errors_5xx_since_boot": snapshot.get("errors_5xx_since_boot", 0),
+        "prediction_requests_since_boot": snapshot.get("prediction_requests_since_boot", 0),
+        "telemetry_ingested_since_boot": snapshot.get("telemetry_ingested_since_boot", 0),
         "average_inference_ms_since_boot": round(avg_ms, 3),
         "inference_count_since_boot": count,
-        "uptime_seconds": round(monotonic() - _started_at, 2),
+        "uptime_seconds": round(uptime, 2),
+        # Latencias HTTP tomadas en el servidor: NO son el tiempo desde cliente.
+        "http_latency_p50_ms": _percentile(http_latencies, 0.50),
+        "http_latency_p95_ms": _percentile(http_latencies, 0.95),
+        "predict_http_latency_p50_ms": _percentile(predict_latencies, 0.50),
+        "predict_http_latency_p95_ms": _percentile(predict_latencies, 0.95),
+        "requests_per_minute_since_boot": round(snapshot.get("http_requests_since_boot", 0) * 60 / max(1.0, uptime), 2),
+        "latency_sample_count": len(http_latencies),
+        "latency_sample_window_max": 3000,
         "total_telemetry_persisted": int(total_samples),
         "total_robots_persisted": int(total_robots),
         "persistence": "DATABASE",
