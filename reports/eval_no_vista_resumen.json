@@ -1,0 +1,104 @@
+{
+  "evaluation": "ACI606 Etapa 8A - flotas externas al entrenamiento",
+  "api": "http://127.0.0.1:8000",
+  "seed": 2029,
+  "fleets_generated": 8,
+  "fleets_evaluated": [
+    "EVAL-2029-F01",
+    "EVAL-2029-F02",
+    "EVAL-2029-F03",
+    "EVAL-2029-F04",
+    "EVAL-2029-F05",
+    "EVAL-2029-F06",
+    "EVAL-2029-F07",
+    "EVAL-2029-F08"
+  ],
+  "robots_per_fleet": 6,
+  "sensor_shift": "Temperatura ±0.7 C, velocidad ±1.5 %, vibración ±2.25 % según flota",
+  "steps_per_robot": 35,
+  "samples_generated": 1680,
+  "samples_evaluated": 320,
+  "training_majority_class": "CRITICAL",
+  "actual_class_distribution": {
+    "CRITICAL": 111,
+    "WARNING": 96,
+    "NORMAL": 113
+  },
+  "predicted_class_distribution": {
+    "CRITICAL": 114,
+    "WARNING": 95,
+    "NORMAL": 111
+  },
+  "macro_f1": 0.925667,
+  "baseline_macro_f1": 0.171694,
+  "accuracy": 0.928125,
+  "confusion_labels": [
+    "NORMAL",
+    "WARNING",
+    "CRITICAL"
+  ],
+  "confusion_matrix": [
+    [
+      103,
+      10,
+      0
+    ],
+    [
+      8,
+      84,
+      4
+    ],
+    [
+      0,
+      1,
+      110
+    ]
+  ],
+  "classification_report": {
+    "NORMAL": {
+      "precision": 0.9279279279279279,
+      "recall": 0.911504424778761,
+      "f1-score": 0.9196428571428571,
+      "support": 113.0
+    },
+    "WARNING": {
+      "precision": 0.8842105263157894,
+      "recall": 0.875,
+      "f1-score": 0.8795811518324608,
+      "support": 96.0
+    },
+    "CRITICAL": {
+      "precision": 0.9649122807017544,
+      "recall": 0.990990990990991,
+      "f1-score": 0.9777777777777777,
+      "support": 111.0
+    },
+    "accuracy": 0.928125,
+    "macro avg": {
+      "precision": 0.9256835783151572,
+      "recall": 0.925831805256584,
+      "f1-score": 0.9256672622510319,
+      "support": 320.0
+    },
+    "weighted avg": {
+      "precision": 0.9276416548127073,
+      "recall": 0.928125,
+      "f1-score": 0.9277898961449763,
+      "support": 320.0
+    }
+  },
+  "latency_client_p50_ms": 5.734,
+  "latency_client_p95_ms": 7.831,
+  "model_versions": [
+    "v1"
+  ],
+  "higher_than_baseline": true,
+  "notes": [
+    "Los estados reales provienen de simulator.core.step_robot y NO se envían a /predict.",
+    "El muestreo aleatorio se realizó antes de consultar el modelo.",
+    "Se incluyeron perturbaciones pequeñas de sensores por flota, sin cambiar el estado real oculto.",
+    "La prueba no reentrena el pipeline y no hace POST /telemetry.",
+    "Los percentiles de latencia son medidos desde este cliente local.",
+    "Las muestras repetidas de un mismo robot están correlacionadas temporalmente; no equivalen a observaciones independientes."
+  ]
+}
