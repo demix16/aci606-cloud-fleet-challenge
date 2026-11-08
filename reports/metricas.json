@@ -1,0 +1,59 @@
+{
+  "model_version": "v1",
+  "chosen_model": "LogisticRegression",
+  "features": [
+    "speed",
+    "battery",
+    "motor_temp",
+    "vibration",
+    "motor_current",
+    "obstacle_distance"
+  ],
+  "classes": [
+    "NORMAL",
+    "WARNING",
+    "CRITICAL"
+  ],
+  "validation_macro_f1": {
+    "LogisticRegression": 0.9362761274613646,
+    "RandomForest": 0.9231658737708629
+  },
+  "test_macro_f1": 0.9153980522401576,
+  "baseline_macro_f1": 0.17177028559645324,
+  "rows": 12000,
+  "train_fleets": [
+    "F001",
+    "F002",
+    "F003",
+    "F004",
+    "F005",
+    "F006",
+    "F007",
+    "F009",
+    "F010",
+    "F012",
+    "F013",
+    "F014",
+    "F016",
+    "F018",
+    "F019",
+    "F021",
+    "F022",
+    "F023",
+    "F024",
+    "F025",
+    "F026",
+    "F027",
+    "F028",
+    "F029"
+  ],
+  "test_fleets": [
+    "F008",
+    "F011",
+    "F015",
+    "F017",
+    "F020",
+    "F030"
+  ],
+  "seed": 606
+}
