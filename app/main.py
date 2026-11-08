@@ -11,6 +11,7 @@ from collections import Counter, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from math import isfinite
 from threading import Lock
 from time import monotonic, perf_counter
 from typing import Literal
@@ -18,7 +19,8 @@ from typing import Literal
 import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 
@@ -104,6 +106,30 @@ app = FastAPI(
     description="Etapa 7: persistencia, inferencia, dashboard y observabilidad.",
     lifespan=lifespan,
 )
+
+
+def _json_safe(value):
+    """Evita HTTP 500 serializando valores no finitos en errores de validación.
+
+    Cuando el cliente envía un literal JSON NaN/Infinity, Pydantic lo rechaza,
+    pero su valor también puede aparecer en el detalle de error; JSONResponse
+    estándar no puede serializarlo si no se normaliza primero.
+    """
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, float) and not isfinite(value):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(_request: Request, exc: RequestValidationError):
+    """Toda entrada inválida, incluso NaN literal, recibe HTTP 422 (no 500)."""
+    return JSONResponse(status_code=422, content={"detail": _json_safe(exc.errors())})
 
 
 def _percentile(values: list[float], fraction: float) -> float:

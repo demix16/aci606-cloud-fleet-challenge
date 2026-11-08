@@ -1,0 +1,152 @@
+{
+  "evaluation": "ACI606 Etapa 8B - concurrencia, robustez y latencia",
+  "timestamp_utc": "2026-11-08T04:54:27.183283+00:00",
+  "api": "http://127.0.0.1:8000",
+  "version": "0.4.0-dashboard-metrics",
+  "storage": "postgresql",
+  "timeout_por_solicitud_segundos": 30.0,
+  "invalid_cases": [
+    {
+      "caso": "falta_battery",
+      "http": 422,
+      "rechazado_4xx": true,
+      "client_ms": 15.249
+    },
+    {
+      "caso": "battery_negativa",
+      "http": 422,
+      "rechazado_4xx": true,
+      "client_ms": 15.681
+    },
+    {
+      "caso": "battery_mayor_100",
+      "http": 422,
+      "rechazado_4xx": true,
+      "client_ms": 2.003
+    },
+    {
+      "caso": "speed_negativa",
+      "http": 422,
+      "rechazado_4xx": true,
+      "client_ms": 1.807
+    },
+    {
+      "caso": "timestamp_negativo",
+      "http": 422,
+      "rechazado_4xx": true,
+      "client_ms": 1.74
+    },
+    {
+      "caso": "robot_id_con_espacio",
+      "http": 422,
+      "rechazado_4xx": true,
+      "client_ms": 1.808
+    },
+    {
+      "caso": "campo_inesperado",
+      "http": 422,
+      "rechazado_4xx": true,
+      "client_ms": 1.762
+    },
+    {
+      "caso": "NaN_no_finito",
+      "http": 422,
+      "rechazado_4xx": true,
+      "client_ms": 1.632
+    },
+    {
+      "caso": "NaN_literal_json",
+      "http": 422,
+      "rechazado_4xx": true,
+      "client_ms": 1.902
+    }
+  ],
+  "valid_warmup": [
+    {
+      "fase": "calentamiento",
+      "solicitud": 0,
+      "http": 200,
+      "client_ms": 20.072,
+      "correcto": true,
+      "detalle": "correcto"
+    },
+    {
+      "fase": "calentamiento",
+      "solicitud": 1,
+      "http": 200,
+      "client_ms": 3.995,
+      "correcto": true,
+      "detalle": "correcto"
+    },
+    {
+      "fase": "calentamiento",
+      "solicitud": 2,
+      "http": 200,
+      "client_ms": 4.027,
+      "correcto": true,
+      "detalle": "correcto"
+    }
+  ],
+  "rounds": [
+    {
+      "clientes_concurrentes": 1,
+      "solicitudes": 10,
+      "correctas": 10,
+      "fallidas": 0,
+      "duracion_s": 0.054,
+      "solicitudes_confirmadas_por_segundo": 183.77,
+      "latencia_cliente_p50_ms": 3.857,
+      "latencia_cliente_p95_ms": 11.482,
+      "latencia_cliente_max_ms": 15.375,
+      "codigos_http": {
+        "200": 10
+      }
+    },
+    {
+      "clientes_concurrentes": 4,
+      "solicitudes": 24,
+      "correctas": 24,
+      "fallidas": 0,
+      "duracion_s": 0.093,
+      "solicitudes_confirmadas_por_segundo": 259.05,
+      "latencia_cliente_p50_ms": 12.578,
+      "latencia_cliente_p95_ms": 14.511,
+      "latencia_cliente_max_ms": 25.208,
+      "codigos_http": {
+        "200": 24
+      }
+    },
+    {
+      "clientes_concurrentes": 8,
+      "solicitudes": 64,
+      "correctas": 64,
+      "fallidas": 0,
+      "duracion_s": 0.186,
+      "solicitudes_confirmadas_por_segundo": 343.17,
+      "latencia_cliente_p50_ms": 22.175,
+      "latencia_cliente_p95_ms": 28.068,
+      "latencia_cliente_max_ms": 33.732,
+      "codigos_http": {
+        "200": 64
+      }
+    }
+  ],
+  "errors_5xx_since_boot_before": 0,
+  "errors_5xx_since_boot_after": 0,
+  "health_after": {
+    "status": "ok",
+    "database": "ok",
+    "model_ready": true
+  },
+  "total_telemetry_before": 438,
+  "total_telemetry_after": 438,
+  "telemetry_unchanged_during_test": true,
+  "passed": true,
+  "notes": [
+    "Este script NO ejecuta POST /telemetry y NO actualiza registros en PostgreSQL.",
+    "Las métricas de /metrics son acumuladas desde el arranque y pueden incluir tráfico del dashboard.",
+    "Los percentiles de esta evaluación se miden desde el cliente que hace las solicitudes.",
+    "Si el simulador está funcionando en paralelo, los contadores y total de registros pueden variar.",
+    "La prueba local NO sustituye repetirla contra la URL pública de Render."
+  ]
+}
