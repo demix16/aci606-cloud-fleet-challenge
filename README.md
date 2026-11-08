@@ -1,6 +1,6 @@
 # Cloud Fleet Challenge — Ejercicio 4 de ACI606
 
-**Cloud Computing | Plataforma de monitoreo de flotas virtuales con Machine Learning**
+**Cloud Computing | Plataforma de monitoreo de flotas virtuales con Machine Learning** 
 
 Proyecto desarrollado a partir del [repositorio inicial del profesor](https://github.com/DrOscarL/aci606-cloud-fleet-challenge), extendido para ofrecer una solución desplegada en la nube con **FastAPI, PostgreSQL (Neon), Machine Learning (scikit-learn) y un dashboard web de monitoreo**.
 
